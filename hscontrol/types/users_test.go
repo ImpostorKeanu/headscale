@@ -361,6 +361,7 @@ func TestOIDCClaimsJSONToUser(t *testing.T) {
 			useUnverifiedEmail: true,
 			want: User{
 				Provider: util.RegisterMethodOIDC,
+				Email:    "test-unverified-email@test.no",
 				ProviderIdentifier: sql.NullString{
 					String: "/test-unverified-email",
 					Valid:  true,
