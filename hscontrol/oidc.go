@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
 
@@ -35,14 +34,8 @@ var (
 	errEmptyOIDCCallbackParams = errors.New("empty OIDC callback params")
 	errNoOIDCIDToken           = errors.New("could not extract ID Token for OIDC callback")
 	errNoOIDCRegistrationInfo  = errors.New("could not get registration info from cache")
-	errOIDCAllowedDomains      = errors.New(
-		"authenticated principal does not match any allowed domain",
-	)
-	errOIDCAllowedGroups = errors.New("authenticated principal is not in any allowed group")
-	errOIDCAllowedUsers  = errors.New(
-		"authenticated principal does not match any allowed user",
-	)
-	errOIDCInvalidNodeState = errors.New(
+	errOIDCUnauthorized        = errors.New("authenticated principal is unauthorized")
+	errOIDCInvalidNodeState    = errors.New(
 		"requested node state key expired before authorisation completed",
 	)
 	errOIDCNodeKeyMissing = errors.New("could not get node key from cache")
@@ -281,24 +274,18 @@ func (a *AuthProviderOIDC) OIDCCallbackHandler(
 		util.LogErr(err, "could not get userinfo; only using claims from id token")
 	}
 
-	// The user claims are now updated from the userinfo endpoint so we can verify the user
-	// against allowed emails, email domains, and groups.
-	if err := validateOIDCAllowedDomains(a.cfg.AllowedDomains, &claims); err != nil {
-		httpError(writer, err)
+	// create a temporary User for username negotiation via User.Username()
+	user := new(types.User)
+	// populate via FromClaim for consistent email handling and username resolution
+	user.FromClaim(&claims, a.cfg.UseUnverifiedEmail)
+	// authorize the user
+	if !a.cfg.Authorization.Check(user, &claims) {
+		httpError(writer, errOIDCUnauthorized)
 		return
 	}
 
-	if err := validateOIDCAllowedGroups(a.cfg.AllowedGroups, &claims); err != nil {
-		httpError(writer, err)
-		return
-	}
-
-	if err := validateOIDCAllowedUsers(a.cfg.AllowedUsers, &claims); err != nil {
-		httpError(writer, err)
-		return
-	}
-
-	user, c, err := a.createOrUpdateUserFromClaim(&claims)
+	var c change.ChangeSet
+	user, c, err = a.createOrUpdateUserFromClaim(&claims)
 	if err != nil {
 		log.Error().
 			Err(err).
@@ -424,57 +411,6 @@ func (a *AuthProviderOIDC) extractIDToken(
 	return idToken, nil
 }
 
-// validateOIDCAllowedDomains checks that if AllowedDomains is provided,
-// that the authenticated principal ends with @<alloweddomain>.
-func validateOIDCAllowedDomains(
-	allowedDomains []string,
-	claims *types.OIDCClaims,
-) error {
-	if len(allowedDomains) > 0 {
-		if at := strings.LastIndex(claims.Email, "@"); at < 0 ||
-			!slices.Contains(allowedDomains, claims.Email[at+1:]) {
-			return NewHTTPError(http.StatusUnauthorized, "unauthorised domain", errOIDCAllowedDomains)
-		}
-	}
-
-	return nil
-}
-
-// validateOIDCAllowedGroups checks if AllowedGroups is provided,
-// and that the user has one group in the list.
-// claims.Groups can be populated by adding a client scope named
-// 'groups' that contains group membership.
-func validateOIDCAllowedGroups(
-	allowedGroups []string,
-	claims *types.OIDCClaims,
-) error {
-	if len(allowedGroups) > 0 {
-		for _, group := range allowedGroups {
-			if slices.Contains(claims.Groups, group) {
-				return nil
-			}
-		}
-
-		return NewHTTPError(http.StatusUnauthorized, "unauthorised group", errOIDCAllowedGroups)
-	}
-
-	return nil
-}
-
-// validateOIDCAllowedUsers checks that if AllowedUsers is provided,
-// that the authenticated principal is part of that list.
-func validateOIDCAllowedUsers(
-	allowedUsers []string,
-	claims *types.OIDCClaims,
-) error {
-	if len(allowedUsers) > 0 &&
-		!slices.Contains(allowedUsers, claims.Email) {
-		return NewHTTPError(http.StatusUnauthorized, "unauthorised user", errOIDCAllowedUsers)
-	}
-
-	return nil
-}
-
 // getRegistrationIDFromState retrieves the registration ID from the state.
 func (a *AuthProviderOIDC) getRegistrationIDFromState(state string) *types.RegistrationID {
 	regInfo, ok := a.registrationCache.Get(state)
@@ -505,7 +441,7 @@ func (a *AuthProviderOIDC) createOrUpdateUserFromClaim(
 		user = &types.User{}
 	}
 
-	user.FromClaim(claims, a.cfg.DisableEmailVerified)
+	user.FromClaim(claims, a.cfg.UseUnverifiedEmail)
 
 	if newUser {
 		user, c, err = a.h.state.CreateUser(*user)

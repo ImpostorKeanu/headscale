@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -172,6 +173,91 @@ type PKCEConfig struct {
 	Method  string
 }
 
+type OIDCAuthorizationConfig struct {
+	// DefaultAllow determines if any authenticated user should
+	// be authorized if AllowedDomains, AllowedUsers, and AllowedGroups
+	// are nil or empty.
+	DefaultAllow   bool
+	AllowedDomains []string
+	AllowedUsers   []string
+	AllowedGroups  []string
+}
+
+// Check determines if the user is authorized by checking the user's
+// fields against the AllowedDomains, AllowedGroups, and
+// AllowedUsers.
+//
+// Notes:
+//
+//   - User fields are assumed to have been populated via User.FromClaim,
+//     which respoects email address verification and format.
+//   - Logic performs all tests until one succeeds.
+func (a *OIDCAuthorizationConfig) Check(user *User, claims *OIDCClaims) (authorized bool) {
+	// track the number of authorization tests performed to signal
+	// if default allow should be applied
+	var testCount int
+	var lastContainsV string // keeps value of last contains test
+
+	// anonymous functions maintain test count and the last tested
+	// value, and sets authorized to the test outcome
+
+	// for claims with a string
+	contains := func(s []string, v string) bool {
+		if len(s) > 0 {
+			testCount++
+			lastContainsV = v
+			authorized = slices.Contains(s, v)
+		}
+		return authorized
+	}
+
+	// for claims with a slice of strings
+	containsS := func(s []string, x []string) bool {
+		if len(s) > 0 {
+			testCount++
+			authorized = slices.ContainsFunc(s, func(e string) bool {
+				lastContainsV = e
+				return slices.Contains(x, e)
+			})
+		}
+		return authorized
+	}
+
+	// get the users's username and email domain for tests
+	username := user.Username()
+	var emailDomain string
+	if at := strings.LastIndex(user.Email, "@"); at > 0 {
+		emailDomain = user.Email[at+1:]
+	}
+
+	var msg string
+	switch {
+	case contains(a.AllowedDomains, emailDomain):
+		// user has allowed email domain
+		msg = fmt.Sprintf("oidc user %s authorized: allowed email domain (%s)", username, lastContainsV)
+
+	case containsS(a.AllowedGroups, claims.Groups):
+		// user is a member of an allowed group
+		msg = fmt.Sprintf("oidc user %s authorized: allowed group membership (%s)", username, lastContainsV)
+
+	case contains(a.AllowedUsers, username):
+		// user has an allowed username
+		msg = fmt.Sprintf("oidc user %s authorized: allowed username", username)
+
+	case testCount == 0 && a.DefaultAllow:
+		// handle default allow, the one case where authorized is explicitly set
+		msg = fmt.Sprintf("oidc user %s authorized: default allow", username)
+		authorized = true
+
+	case !authorized:
+		// user is unauthorized
+		msg = fmt.Sprintf("oidc user %s unauthorized", username)
+	}
+	log.Info().Caller().Msg(msg)
+
+	return
+}
+
 type OIDCConfig struct {
 	OnlyStartIfOIDCIsAvailable bool
 	Issuer                     string
@@ -179,20 +265,18 @@ type OIDCConfig struct {
 	ClientSecret               string
 	Scope                      []string
 	ExtraParams                map[string]string
-	AllowedDomains             []string
-	AllowedUsers               []string
-	AllowedGroups              []string
-	// DisableEmailVerified causes Headscale accept the email claim even
+	Authorization              OIDCAuthorizationConfig
+	// UseUnverifiedEmail causes Headscale accept the email claim even
 	// if the email_verified claim is absent or false.
 	//
 	// This should probably be used only when the OpenID provider can't
 	// be configured to send the email_verified claim, such as the case
 	// with Cloudflare's Access Generic OIDC with One-time Passcode
 	// authentication.
-	DisableEmailVerified bool
-	Expiry               time.Duration
-	UseExpiryFromToken   bool
-	PKCE                 PKCEConfig
+	UseUnverifiedEmail bool
+	Expiry             time.Duration
+	UseExpiryFromToken bool
+	PKCE               PKCEConfig
 }
 
 type DERPConfig struct {
@@ -335,6 +419,7 @@ func LoadConfig(path string, isFile bool) error {
 	viper.SetDefault("oidc.use_expiry_from_token", false)
 	viper.SetDefault("oidc.pkce.enabled", false)
 	viper.SetDefault("oidc.pkce.method", "S256")
+	viper.SetDefault("oidc.use_unverified_email", false)
 
 	viper.SetDefault("logtail.enabled", false)
 	viper.SetDefault("randomize_client_port", false)
@@ -390,6 +475,11 @@ func validateServerConfig() error {
 	if viper.GetBool("oidc.enabled") {
 		if err := validatePKCEMethod(viper.GetString("oidc.pkce.method")); err != nil {
 			return err
+		}
+		if viper.IsSet("oidc.use_unverified_email") {
+			log.Warn().Msg("oidc is configured to use unverified email addresses")
+		} else {
+			log.Warn().Msg("oidc is configured to use only verified email addresses")
 		}
 	}
 
@@ -955,15 +1045,18 @@ func LoadServerConfig() (*Config, error) {
 			OnlyStartIfOIDCIsAvailable: viper.GetBool(
 				"oidc.only_start_if_oidc_is_available",
 			),
-			Issuer:               viper.GetString("oidc.issuer"),
-			ClientID:             viper.GetString("oidc.client_id"),
-			ClientSecret:         oidcClientSecret,
-			Scope:                viper.GetStringSlice("oidc.scope"),
-			ExtraParams:          viper.GetStringMapString("oidc.extra_params"),
-			AllowedDomains:       viper.GetStringSlice("oidc.allowed_domains"),
-			AllowedUsers:         viper.GetStringSlice("oidc.allowed_users"),
-			AllowedGroups:        viper.GetStringSlice("oidc.allowed_groups"),
-			DisableEmailVerified: viper.GetBool("oidc.disable_email_verified"),
+			Authorization: OIDCAuthorizationConfig{
+				DefaultAllow:   viper.GetBool("oidc.authorization.default_allow"),
+				AllowedDomains: viper.GetStringSlice("oidc.authorization.allowed_domains"),
+				AllowedUsers:   viper.GetStringSlice("oidc.authorization.allowed_users"),
+				AllowedGroups:  viper.GetStringSlice("oidc.authorization.allowed_groups"),
+			},
+			Issuer:             viper.GetString("oidc.issuer"),
+			ClientID:           viper.GetString("oidc.client_id"),
+			ClientSecret:       oidcClientSecret,
+			Scope:              viper.GetStringSlice("oidc.scope"),
+			ExtraParams:        viper.GetStringMapString("oidc.extra_params"),
+			UseUnverifiedEmail: viper.GetBool("oidc.use_unverified_email"),
 			Expiry: func() time.Duration {
 				// if set to 0, we assume no expiry
 				if value := viper.GetString("oidc.expiry"); value == "0" {
