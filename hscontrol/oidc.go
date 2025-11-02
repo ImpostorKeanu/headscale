@@ -281,11 +281,13 @@ func (a *AuthProviderOIDC) OIDCCallbackHandler(
 		util.LogErr(err, "could not get userinfo; only using claims from id token")
 	}
 
-	// The user claims are now updated from the userinfo endpoint so we can verify the user
-	// against allowed emails, email domains, and groups.
-	if err := validateOIDCAllowedDomains(a.cfg.AllowedDomains, &claims); err != nil {
-		httpError(writer, err)
-		return
+	if bool(claims.EmailVerified) || a.cfg.UseUnverifiedEmail {
+		// The user claims are now updated from the userinfo endpoint so we can verify the user
+		// against allowed emails, email domains, and groups.
+		if err := validateOIDCAllowedDomains(a.cfg.AllowedDomains, &claims); err != nil {
+			httpError(writer, err)
+			return
+		}
 	}
 
 	if err := validateOIDCAllowedGroups(a.cfg.AllowedGroups, &claims); err != nil {
@@ -505,7 +507,7 @@ func (a *AuthProviderOIDC) createOrUpdateUserFromClaim(
 		user = &types.User{}
 	}
 
-	user.FromClaim(claims)
+	user.FromClaim(claims, a.cfg.UseUnverifiedEmail)
 
 	if newUser {
 		user, c, err = a.h.state.CreateUser(*user)

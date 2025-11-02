@@ -328,6 +328,7 @@ func LoadConfig(path string, isFile bool) error {
 	viper.SetDefault("oidc.use_expiry_from_token", false)
 	viper.SetDefault("oidc.pkce.enabled", false)
 	viper.SetDefault("oidc.pkce.method", "S256")
+	viper.SetDefault("oidc.use_unverified_email", false)
 
 	viper.SetDefault("logtail.enabled", false)
 	viper.SetDefault("randomize_client_port", false)
@@ -384,11 +385,12 @@ func validateServerConfig() error {
 		if err := validatePKCEMethod(viper.GetString("oidc.pkce.method")); err != nil {
 			return err
 		}
-		if viper.IsSet("oidc.use_unverified_email") {
-			log.Warn().Msg("unverified emails will be accepted during oidc authentication (oidc.use_unverified_email=true)")
-		} else {
-			log.Warn().Msg("only verified emails will be accepted during oidc authentication (oidc.use_unverified_email=false)")
-		}
+	}
+
+	if viper.IsSet("oidc.use_unverified_email") {
+		log.Warn().Msg("unverified emails will be accepted during oidc authentication (oidc.use_unverified_email=true)")
+	} else {
+		log.Warn().Msg("only verified emails will be accepted during oidc authentication (oidc.use_unverified_email=false)")
 	}
 
 	depr.Log()
