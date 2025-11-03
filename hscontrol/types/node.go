@@ -269,11 +269,19 @@ func (node *Node) Prefixes() []netip.Prefix {
 // node has any exit routes enabled.
 // If none are enabled, it will return nil.
 func (node *Node) ExitRoutes() []netip.Prefix {
-	if slices.ContainsFunc(node.SubnetRoutes(), tsaddr.IsExitRoute) {
-		return tsaddr.ExitRoutes()
+	var routes []netip.Prefix
+
+	for _, route := range node.AnnouncedRoutes() {
+		if tsaddr.IsExitRoute(route) && slices.Contains(node.ApprovedRoutes, route) {
+			routes = append(routes, route)
+		}
 	}
 
-	return nil
+	return routes
+}
+
+func (node *Node) IsExitNode() bool {
+	return len(node.ExitRoutes()) > 0
 }
 
 func (node *Node) IPsAsString() []string {
@@ -311,7 +319,14 @@ func (node *Node) CanAccess(matchers []matcher.Match, node2 *Node) bool {
 			return true
 		}
 
+		// Check if the node has access to routes that might be part of a
+		// smaller subnet that is served from node2 as a subnet router.
 		if matcher.DestsOverlapsPrefixes(node2.SubnetRoutes()...) {
+			return true
+		}
+
+		// If the dst is "the internet" and node2 is an exit node, allow access.
+		if matcher.DestsIsTheInternet() && node2.IsExitNode() {
 			return true
 		}
 	}
@@ -440,16 +455,22 @@ func (node *Node) AnnouncedRoutes() []netip.Prefix {
 	return node.Hostinfo.RoutableIPs
 }
 
-// SubnetRoutes returns the list of routes that the node announces and are approved.
+// SubnetRoutes returns the list of routes (excluding exit routes) that the node
+// announces and are approved.
 //
-// IMPORTANT: This method is used for internal data structures and should NOT be used
-// for the gRPC Proto conversion. For Proto, SubnetRoutes must be populated manually
-// with PrimaryRoutes to ensure it includes only routes actively served by the node.
-// See the comment in Proto() method and the implementation in grpcv1.go/nodesToProto.
+// IMPORTANT: This method is used for internal data structures and should NOT be
+// used for the gRPC Proto conversion. For Proto, SubnetRoutes must be populated
+// manually with PrimaryRoutes to ensure it includes only routes actively served
+// by the node. See the comment in Proto() method and the implementation in
+// grpcv1.go/nodesToProto.
 func (node *Node) SubnetRoutes() []netip.Prefix {
 	var routes []netip.Prefix
 
 	for _, route := range node.AnnouncedRoutes() {
+		if tsaddr.IsExitRoute(route) {
+			continue
+		}
+
 		if slices.Contains(node.ApprovedRoutes, route) {
 			routes = append(routes, route)
 		}
@@ -461,6 +482,11 @@ func (node *Node) SubnetRoutes() []netip.Prefix {
 // IsSubnetRouter reports if the node has any subnet routes.
 func (node *Node) IsSubnetRouter() bool {
 	return len(node.SubnetRoutes()) > 0
+}
+
+// AllApprovedRoutes returns the combination of SubnetRoutes and ExitRoutes
+func (node *Node) AllApprovedRoutes() []netip.Prefix {
+	return append(node.SubnetRoutes(), node.ExitRoutes()...)
 }
 
 func (node *Node) String() string {
@@ -653,6 +679,7 @@ func (node Node) DebugString() string {
 	fmt.Fprintf(&sb, "\tApprovedRoutes: %v\n", node.ApprovedRoutes)
 	fmt.Fprintf(&sb, "\tAnnouncedRoutes: %v\n", node.AnnouncedRoutes())
 	fmt.Fprintf(&sb, "\tSubnetRoutes: %v\n", node.SubnetRoutes())
+	fmt.Fprintf(&sb, "\tExitRoutes: %v\n", node.ExitRoutes())
 	sb.WriteString("\n")
 
 	return sb.String()
@@ -678,27 +705,11 @@ func (v NodeView) InIPSet(set *netipx.IPSet) bool {
 }
 
 func (v NodeView) CanAccess(matchers []matcher.Match, node2 NodeView) bool {
-	if !v.Valid() || !node2.Valid() {
+	if !v.Valid() {
 		return false
 	}
-	src := v.IPs()
-	allowedIPs := node2.IPs()
 
-	for _, matcher := range matchers {
-		if !matcher.SrcsContainsIPs(src...) {
-			continue
-		}
-
-		if matcher.DestsContainsIP(allowedIPs...) {
-			return true
-		}
-
-		if matcher.DestsOverlapsPrefixes(node2.SubnetRoutes()...) {
-			return true
-		}
-	}
-
-	return false
+	return v.ж.CanAccess(matchers, node2.AsStruct())
 }
 
 func (v NodeView) CanAccessRoute(matchers []matcher.Match, route netip.Prefix) bool {
@@ -728,6 +739,13 @@ func (v NodeView) IsSubnetRouter() bool {
 		return false
 	}
 	return v.ж.IsSubnetRouter()
+}
+
+func (v NodeView) AllApprovedRoutes() []netip.Prefix {
+	if !v.Valid() {
+		return nil
+	}
+	return v.ж.AllApprovedRoutes()
 }
 
 func (v NodeView) AppendToIPSet(build *netipx.IPSetBuilder) {
@@ -806,6 +824,13 @@ func (v NodeView) ExitRoutes() []netip.Prefix {
 		return nil
 	}
 	return v.ж.ExitRoutes()
+}
+
+func (v NodeView) IsExitNode() bool {
+	if !v.Valid() {
+		return false
+	}
+	return v.ж.IsExitNode()
 }
 
 // RequestTags returns the ACL tags that the node is requesting.
