@@ -31,10 +31,16 @@ const (
 )
 
 var (
-	errOidcMutuallyExclusive = errors.New("oidc_client_secret and oidc_client_secret_path are mutually exclusive")
-	errServerURLSuffix       = errors.New("server_url cannot be part of base_domain in a way that could make the DERP and headscale server unreachable")
-	errServerURLSame         = errors.New("server_url cannot use the same domain as base_domain in a way that could make the DERP and headscale server unreachable")
-	errInvalidPKCEMethod     = errors.New("pkce.method must be either 'plain' or 'S256'")
+	errOidcMutuallyExclusive = errors.New(
+		"oidc_client_secret and oidc_client_secret_path are mutually exclusive",
+	)
+	errServerURLSuffix = errors.New(
+		"server_url cannot be part of base_domain in a way that could make the DERP and headscale server unreachable",
+	)
+	errServerURLSame = errors.New(
+		"server_url cannot use the same domain as base_domain in a way that could make the DERP and headscale server unreachable",
+	)
+	errInvalidPKCEMethod = errors.New("pkce.method must be either 'plain' or 'S256'")
 )
 
 type IPAllocationStrategy string
@@ -388,7 +394,8 @@ func validateServerConfig() error {
 	}
 
 	if viper.IsSet("oidc.use_unverified_email") {
-		log.Warn().Msg("unverified emails will be accepted during oidc authentication (oidc.use_unverified_email=true)")
+		log.Warn().
+			Msg("unverified emails will be accepted during oidc authentication (oidc.use_unverified_email=true)")
 	} else {
 		log.Warn().Msg("only verified emails will be accepted during oidc authentication (oidc.use_unverified_email=false)")
 	}
@@ -396,7 +403,8 @@ func validateServerConfig() error {
 	depr.Log()
 
 	if viper.IsSet("dns.extra_records") && viper.IsSet("dns.extra_records_path") {
-		log.Fatal().Msg("Fatal config error: dns.extra_records and dns.extra_records_path are mutually exclusive. Please remove one of them from your config file")
+		log.Fatal().
+			Msg("Fatal config error: dns.extra_records and dns.extra_records_path are mutually exclusive. Please remove one of them from your config file")
 	}
 
 	// Collect any validation errors and return them all at once
